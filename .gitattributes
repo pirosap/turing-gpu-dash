@@ -1,0 +1,3 @@
+# everything here is deployed to the Linux server: keep LF endings
+* text=auto eol=lf
+*.png binary

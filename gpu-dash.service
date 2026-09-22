@@ -1,0 +1,19 @@
+[Unit]
+Description=Turing Smart Screen GPU dashboard (Tesla V100 x2)
+After=multi-user.target
+
+# Set User (and the paths below) to the account that runs the dashboard.
+[Service]
+Type=simple
+WorkingDirectory=/home/YOUR_USER/gpu_dash
+ExecStart=/home/YOUR_USER/gpu_dash/venv/bin/python /home/YOUR_USER/gpu_dash/gpu_dash.py --port /dev/ttyACM0 --interval 5
+Restart=always
+RestartSec=10
+# only needs: read nvidia-smi, open the serial panel
+User=YOUR_USER
+Group=dialout
+SupplementaryGroups=adm
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

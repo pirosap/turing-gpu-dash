@@ -1,0 +1,3 @@
+# Make the Turing Smart Screen panel world-writable so the gpu-dash service user
+# can open it without being added to dialout. Survives replug/reboot.
+ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="5722", MODE="0666", TAG+="systemd", ENV{SYSTEMD_WANTS}+="gpu-dash.service"

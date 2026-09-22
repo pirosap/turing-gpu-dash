@@ -1,0 +1,6 @@
+# runtime artifacts (server-side outputs, generated previews)
+out/
+__pycache__/
+*.pyc
+.venv/
+venv/
