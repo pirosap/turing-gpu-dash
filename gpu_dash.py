@@ -58,6 +58,20 @@ SPARK_MIN_INTERVAL = 20.0           # s between per-GPU sparkline pushes
 TREND_MIN_INTERVAL = 45.0           # s between big-trend pushes
 WATT_QUANT = 5                      # W rounding, keeps hashes stable
 llama_unit = "llama-server.service"   # 自分の llama.cpp unit 名（プロセス検索の fallback でのみ使用）
+# Tapo P110M (smart plug measuring the LLM server's mains power), via plugp100.
+# Real values are set on the server (Environment= in gpu-dash.service);
+# empty TAPO_USER disables the plug panel ("--").
+TAPO_IP = os.environ.get("TAPO_IP", "YOUR_TAPO_IP")
+TAPO_USER = os.environ.get("TAPO_USER", "YOUR_TAPO_USER")
+TAPO_PASS = os.environ.get("TAPO_PASS", "YOUR_TAPO_PASS")
+TAPO_POLL_INTERVAL = 30.0           # s between P110M polls (also the region throttle)
+KWH_QUANT = 0.1                     # month-energy rounding, keeps hashes stable
+# Plug color thresholds, in WALL power (AC in). The 760 W 80PLUS-Platinum PSU
+# guarantees 90/92/89% at 20/50/100% load, so on the wall:
+#   50% load = 760*0.50/0.92 = 413 W   -> green up to here
+#   70% load = 760*0.70/0.91 = 585 W   -> yellow up to here, red above
+PLUG_POWER_WARN = float(os.environ.get("PLUG_POWER_WARN", "415"))
+PLUG_POWER_CRIT = float(os.environ.get("PLUG_POWER_CRIT", "590"))
 # ---------------------------------------
 
 GREEN = (0, 200, 83)
@@ -247,7 +261,11 @@ def sample_gpus():
 def proc_cmdlines():
     """(pid, argv) for every process readable to us, straight from /proc."""
     out = []
-    for entry in os.listdir("/proc"):
+    try:
+        entries = os.listdir("/proc")
+    except OSError:                     # no /proc (dry-run preview on Windows)
+        return out
+    for entry in entries:
         if not entry.isdigit():
             continue
         try:
@@ -318,6 +336,48 @@ def llama_running():
     return None, None
 
 
+# ---- Tapo P110M (TPAP) ----
+_tapo = {"t": 0.0, "power_w": None, "month_kwh": None}
+
+
+def sample_tapo(force=False):
+    """Poll the P110M every TAPO_POLL_INTERVAL s; cache the last good values.
+    Returns the cache dict. Never raises: on any failure the old values stay
+    and the panel keeps rendering (possibly "--")."""
+    now = time.time()
+    if not force and (now - _tapo["t"]) < TAPO_POLL_INTERVAL:
+        return _tapo
+    _tapo["t"] = now
+    if not TAPO_USER:
+        return _tapo
+    try:
+        import asyncio
+        import aiohttp
+        from plugp100 import TapoDiscovery, connect_discovered_device
+        from plugp100.common.credentials import AuthCredential
+
+        async def _read():
+            cred = AuthCredential(TAPO_USER, TAPO_PASS)
+            async with aiohttp.ClientSession() as session:
+                disc = TapoDiscovery(TAPO_IP, 20802, 10)
+                devices = await disc.scan(timeout=10)
+                if not devices:
+                    raise RuntimeError("P110M not discovered")
+                dev = devices[0]
+                tapo_dev = await connect_discovered_device(dev, cred, session)
+                # device-level API works for componentless TPAP firmwares
+                e = await tapo_dev.client.get_energy_usage()
+                if not e.is_success():
+                    raise RuntimeError(str(e.error()))
+                return e.get()
+        info = asyncio.run(_read())
+        _tapo["power_w"] = (info.current_power or 0) / 1000.0      # mW -> W
+        _tapo["month_kwh"] = (info.month_energy or 0) / 1000.0     # mWh -> kWh
+    except Exception as exc:
+        print(f"tapo poll failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    return _tapo
+
+
 def load_history():
     if not os.path.exists(HISTORY_FILE):
         return []
@@ -356,6 +416,9 @@ def font(kind, size):
             "sans": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "sans_bold": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         }[kind]
+        if not os.path.exists(path):    # preview off the server (Windows): use Consolas/Arial
+            path = {"mono": "consola.ttf", "mono_bold": "consolab.ttf",
+                    "sans": "arial.ttf", "sans_bold": "arialbd.ttf"}[kind]
         _fonts[key] = ImageFont.truetype(path, size)
     return _fonts[key]
 
@@ -401,6 +464,17 @@ def power_color(p_w):
     if p_w > POWER_CRIT:
         return RED
     if p_w > POWER_WARN:
+        return AMBER
+    return GREEN
+
+
+def plug_power_color(p_w):
+    """Watts from the P110M are WALL power -> thresholds in PLUG_POWER_WARN/CRIT."""
+    if p_w is None:
+        return GREY
+    if p_w > PLUG_POWER_CRIT:
+        return RED
+    if p_w > PLUG_POWER_WARN:
         return AMBER
     return GREEN
 
@@ -605,16 +679,52 @@ def build_regions(gpus, history, llama, now):
 
         add(f"vram{k}", x0 + S(2), cy + S(136), pw - S(4), S(22), bg=PANEL, draw_fn=vram)
 
-    # ---- trend panel (full width) ----
+    # ---- trend panel (half width) + plug panel (half width) ----
     def trend(d, w, h, c):
         series = [[hst["gpus"][k]["temp"] for hst in c["history"] if len(hst["gpus"]) > k]
                   for k in range(2)]
+        # half width: only the end labels fit without collision
         draw_graph(d, w, h, series, [GREEN, AMBER], "CORE TEMP TREND",
-                   time_labels=[("-30m", 0.0), ("-20m", 1 / 3), ("-10m", 2 / 3),
-                                ("now", 1.0)])
+                   time_labels=[("-30m", 0.0), ("now", 1.0)])
 
-    add("trend", pad, ty, W - 2 * pad, th, bg=PANEL, border=True,
+    hw = (W - 2 * pad) // 2
+    add("trend", pad, ty, hw, th, bg=PANEL, border=True,
         min_interval=TREND_MIN_INTERVAL, draw_fn=trend)
+    add("plug_bg", pad + hw + pad, ty, hw, th, bg=PANEL, border=True)
+
+    def plug_power(d, w, h, c):
+        # big instant-watts readout (left half of the plug panel). Font size is
+        # fixed from the worst case "255W", so digits never jitter between frames.
+        t = c["tapo"]
+        pw = t["power_w"]
+        big = "--" if pw is None else str(int(round(pw / WATT_QUANT) * WATT_QUANT))
+        text_fit(d, (S(2), S(1)), "PLUG W", "mono", S(10), w - S(4), GREY)
+        txt = big + "W"
+        size = S(26)
+        while size > S(14) and tw(d, "255W", font("sans_bold", size)) > w - S(4):
+            size -= 1
+        d.text((S(2), S(14)), txt, font=font("sans_bold", size),
+               fill=plug_power_color(pw))
+
+    def plug_month(d, w, h, c):
+        # big month-energy readout (right half), same style/size as the watts,
+        # always BLUE (cumulative value, no alarm meaning).
+        t = c["tapo"]
+        kwh = t["month_kwh"]
+        text_fit(d, (S(2), S(1)), "MONTH", "mono", S(10), w - S(4), GREY)
+        txt = "  --" if kwh is None else \
+            f"{round(kwh / KWH_QUANT) * KWH_QUANT:.1f}"
+        size = S(26)
+        while size > S(14) and tw(d, "999.9", font("sans_bold", size)) > w - S(4):
+            size -= 1
+        d.text((S(2), S(14)), txt, font=font("sans_bold", size), fill=BLUE)
+        d.text((S(2), S(40)), "kWh", font=font("mono", S(11)), fill=BLUE)
+
+    # 2px inset inside the plug panel frame (opaque regions repaint borders)
+    add("plug_pwr", pad + hw + pad + S(2), ty + S(2), hw // 2 - S(2), S(56),
+        bg=PANEL, min_interval=TAPO_POLL_INTERVAL, draw_fn=plug_power)
+    add("plug_month", pad + hw + pad + hw // 2, ty + S(2), hw // 2 - S(2), S(56),
+        bg=PANEL, min_interval=TAPO_POLL_INTERVAL, draw_fn=plug_month)
 
     # ---- status panel (full width, 2 rows) ----
     add("status_bg", pad, sy, W - 2 * pad, sh, bg=PANEL, border=True)
@@ -699,7 +809,14 @@ def build_regions(gpus, history, llama, now):
             assert cy <= r.y and r.y + r.h <= cy + ch + 1, f"{r.name} outside card {k}"
     for r in R:
         if r.name == "trend":
-            assert r.y >= cy + ch and r.y + r.h <= sy
+            assert r.y >= cy + ch and r.y + r.h <= sy and r.w <= hw
+    assert pad + 2 * hw <= W - pad + 1, "trend+plug halves exceed canvas width"
+    for r in R:
+        if r.name.startswith("plug"):
+            assert r.x >= pad + hw, f"{r.name} crosses into the trend half"
+            assert r.y >= ty and r.y + r.h <= sy + 1, f"{r.name} outside plug panel"
+            if r.name != "plug_bg":
+                assert r.x + r.w <= pad + 2 * hw - 1, f"{r.name} eats the plug frame"
     status = [r for r in R if r.y > sy and r.name != "trend"]
     for i, a1 in enumerate(status):
         for b1 in status[i + 1:]:
@@ -799,7 +916,8 @@ def main():
     if args.report:
         ls, ml = llama_running()
         ctx = {"gpus": sample_gpus(), "history": history, "llama": ls, "model": ml,
-               "comfyui": comfyui_running(), "now": datetime.now()}
+               "comfyui": comfyui_running(), "now": datetime.now(),
+               "tapo": sample_tapo(force=True)}
         regions = build_regions(ctx["gpus"], ctx["history"], ctx["llama"], ctx["now"])
         total = 0
         print(f"{'region':<11} {'x':>4} {'y':>4} {'w':>4} {'h':>4} {'bytes':>7} "
@@ -831,8 +949,13 @@ def main():
             save_history(history)
 
         llama_state, model_label = llama_running()
+        tapo = sample_tapo()
+        if args.demo and tapo["power_w"] is None:
+            # demo layout preview without touching the plug
+            tapo = dict(tapo, power_w=146.0, month_kwh=28.4)
         ctx = {"gpus": gpus, "history": history, "llama": llama_state,
-               "model": model_label, "comfyui": comfyui_running(), "now": now}
+               "model": model_label, "comfyui": comfyui_running(), "now": now,
+               "tapo": tapo}
         regions = build_regions(gpus, history, ctx["llama"], now)
         try:
             sent, throttled = push(regions, ctx, screen, t0)

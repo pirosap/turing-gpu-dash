@@ -61,14 +61,18 @@ USB 接続の Turing Smart Screen 3.5"（UsbMonitor）に常時表示するシ�
 | llama ACTIVE | **プロセス検索が主基準**（`/proc/*/cmdline` に `llama-server`）。systemd unit 参照は複数サービスの使い分けで正しくならないため主基準から撤廃し、プロセスが見つからない場合のみ照会する fallback に格下げ（unit 名は `llama_unit` で設定） |
 | モデル名 | 同上の cmdline から `--model` パスを抽出し `<repo名(-GGUF除去)>-<量子化ディレクトリ>` に変換（例: `SomeModel-GGUF/Q4_K_M/xxx.gguf` → `SomeModel-Q4_K_M`） |
 | ComfyUI ACTIVE | `/proc/*/cmdline` に `ComfyUI/main.py` |
+| PLUG W / MONTH | Tapo P110M を `plugp100`（TPAP 対応）で LAN 計測。**壁コンセント側の消費電力**（PSU 効率込み）。瞬間電力は5W丸め・30秒間隔のキャッシュ取得、MONTH は当月累計 kWh（青固定）。失敗時は `--` を表示し全体は止まらない |
 
 色分け:
 
 | 項目 | 緑 | 黄 | 赤 |
 |---|---|---|---|
 | CORE / MEM 温度 | <58℃ | <70℃ | ≥70℃ |
-| PWR | ≤80W | ≤150W | >150W |
+| PWR（GPUカード） | ≤80W | ≤150W | >150W |
+| PLUG W（壁側） | ≤415W | ≤590W | >590W |
 | グラフの閾値線 | — | — | 80℃（gpu-watchdog が llama を止める基準と一致） |
+
+PLUG W の閾値は PSU 容量から逆算した基準負荷率で決める（例: 760W 80PLUS Platinum なら 20/50/100% 負荷で 90/92/89% 保証 → 壁側 50%≈413W、70%≈585W）。`PLUG_POWER_WARN` / `PLUG_POWER_CRIT` 環境変数で上書き可。
 
 単位は ℃（U+2103、DejaVu にグリフあり）。
 
@@ -119,7 +123,9 @@ POWER_WARN, POWER_CRIT = 80, 150   # PWRフォント色
 SPARK_MIN_INTERVAL, TREND_MIN_INTERVAL = 20.0, 45.0
 ```
 
-依存: pillow, pyserial（サーバ venv）。フォントはサーバの DejaVu。
+P110M を使う場合のみ環境変数（systemd の drop-in 推奨）: `TAPO_IP` / `TAPO_USER` / `TAPO_PASS`（Tapo アプリのアカウント）/ 任意で `PLUG_POWER_WARN`・`PLUG_POWER_CRIT`。未設定ならプラグパネルは `--` のまま。
+
+依存: pillow, pyserial（サーバ venv）。P110M 併用時 `pip install plugp100`。フォントはサーバの DejaVu。
 
 ## ライセンスと参考元
 

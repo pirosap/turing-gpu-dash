@@ -38,7 +38,8 @@ for i in range(360):
 now = datetime.datetime.now().replace(microsecond=0)
 regions = G.build_regions(gpus, history, True, now)
 img = G.composite(regions, {"gpus": gpus, "history": history, "llama": True,
-                            "model": "SomeModel-Q4_K_M", "comfyui": False, "now": now})
+                            "model": "SomeModel-Q4_K_M", "comfyui": False, "now": now,
+                            "tapo": {"t": 0.0, "power_w": 165.0, "month_kwh": 42.6}})
 
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 out = os.path.join(repo_root, "assets", "preview_latest.png")
